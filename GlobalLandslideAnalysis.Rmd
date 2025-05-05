@@ -1,0 +1,570 @@
+---
+title: "Project_DS5110: Uncovering Global Landslide Patterns Through Unsupervised Learning"
+author: "Team 8"
+date: "2025-04-14"
+output: pdf_document
+---
+## Loading necessary libraries
+
+```{r warning=FALSE, message=FALSE}
+if (!require(Rtsne)) install.packages("Rtsne")
+if (!require(mclust)) install.packages("mclust")
+if (!require(ggplot2)) install.packages("ggplot2")
+if (!require(ggplot2)) install.packages("ggrepel")
+if (!require(ggplot2)) install.packages("webshot2")
+
+library(webshot2)
+library(Rtsne)
+library(mclust)
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(readr)
+library(cluster)
+library(factoextra)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+library(countrycode)
+library(plotly)
+library(reshape2)
+library(corrplot)
+library(leaflet)
+library(dplyr)
+library(ggrepel)
+
+```
+
+# **Data Loading and Preprocessing:**
+## Loading and summarizing the dataset
+
+```{r}
+landslides <- read.csv("Global_Landslide_Catalog_Export_20250402.csv", stringsAsFactors = FALSE)
+summary(landslides)
+```
+## Check for missing values
+
+```{r}
+colSums(is.na(landslides))
+```
+
+## Check for numeric columns
+
+```{r}
+num_cols <- names(landslides)[sapply(landslides, is.numeric)]
+print(num_cols)
+```
+
+## Check for categorical columns
+
+```{r}
+cat_cols <- names(landslides)[sapply(landslides, function(x) is.factor(x) || is.character(x))]
+print(cat_cols)
+```
+
+## Create subset of interested columns
+
+```{r}
+landslides_subset <- landslides %>%
+  select(
+    event_date,
+    location_accuracy,
+    landslide_category,
+    landslide_trigger,
+    landslide_size,
+    fatality_count,
+    country_name,
+    country_code,
+    longitude,
+    latitude
+  )
+  
+head(landslides_subset)
+```
+
+## Missing values imputation
+
+```{r}
+dim(landslides_subset)
+landslides_subset <- landslides_subset %>%
+  mutate(across(where(is.character), ~ na_if(., ""))) %>%
+  na.omit()
+
+dim(landslides_subset)
+```
+## Separate event date and event time
+
+```{r}
+landslides_subset <- landslides_subset %>%
+  mutate(
+    event_date = parse_date_time(event_date, orders = c("mdY HMS", "mdY")),
+    date = as.Date(event_date),
+    time = format(event_date, format = "%H:%M:%S")
+  ) %>%
+  select(-event_date)
+head(landslides_subset)
+
+```
+
+## Encode categorical columns to numerical values
+
+```{r}
+landslides_encoded <- landslides_subset %>%
+  mutate(across(where(~ is.character(.) || is.factor(.)), ~ as.numeric(as.factor(.))))
+
+str(landslides_encoded)
+```
+
+# **Exploratory Data Analysis:**
+## Correlation HeatMap
+
+```{r}
+landslides_encoded$date <- as.numeric(landslides_encoded$date)
+
+landslides_numeric <- landslides_encoded %>%
+  mutate(date = as.numeric(date)) %>%
+  select(where(is.numeric))
+
+cor_matrix <- cor(landslides_numeric, use = "complete.obs")
+cor_melt <- melt(cor_matrix, varnames = c("Var1", "Var2"), value.name = "Correlation")
+
+plot_ly(
+  data = cor_melt,
+  x = ~Var1,
+  y = ~Var2,
+  z = ~Correlation,
+  type = "heatmap",
+  colors = colorRamp(c("blue", "white", "red"))
+) %>%
+  layout(
+    title = "Interactive Correlation Heatmap",
+    xaxis = list(title = "", tickangle = 45),
+    yaxis = list(title = "")
+  )
+
+```
+
+## Analysis of global events:
+* The heatmap visualizes pairwise correlations between various features related to landslides, such as time, location, and event attributes.
+
+* Strong positive correlations (red) are observed among categorical variables: landslide_category, landslide_trigger, and landslide_size, suggesting these variables are interrelated.
+
+*  country_code and country_name show very high correlation, which is expected as they represent the same geographic information in different formats.
+
+* latitude and longitude are weakly correlated with most other variables but negatively correlated with country_code, indicating spatial variation across countries.
+
+* location_accuracy has a strong positive correlation with landslide_category, suggesting better accuracy might be reported for specific types of landslides.
+
+* fatality_count appears largely uncorrelated with other variables, indicating fatalities may not be directly explained by a single variable in the dataset.
+
+* The time variable is weakly correlated with most other variables, implying limited temporal trends across features.
+
+## Global Interactive Map
+
+```{r warning=FALSE}
+landslides_subset <- landslides_subset %>%
+  mutate(
+    landslide_type = ifelse(tolower(landslide_category) == "landslide", 
+                            landslide_trigger, 
+                            landslide_category)
+  )
+
+factpal <- colorFactor(palette = "Set1", domain = landslides_subset$landslide_type)
+
+landslide_map <- leaflet(data = landslides_subset) %>% 
+  addTiles() %>%  
+  addCircleMarkers(
+    lng = ~longitude, 
+    lat = ~latitude,
+    radius = 4,
+    color = ~factpal(landslide_type),
+    stroke = FALSE,
+    fillOpacity = 0.7,
+    label = ~paste("Category:", landslide_type),
+    clusterOptions = markerClusterOptions() 
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = factpal,
+    values = ~landslide_type,
+    title = "Landslide Category",
+    opacity = 1
+  )
+
+landslide_map
+```
+
+
+## Analysis of global events:
+* The interactive map displays global landslide events, clustered and color-coded by landslide type using a combined landslide_category and landslide_trigger field.
+
+* High concentrations of events are seen in South Asia (~3451), Central America (~2900), South America (~850), and parts of Africa (~640), indicating regional hotspots for landslide occurrences.
+
+* Each cluster bubble represents the total number of landslides in that region, with larger and more saturated bubbles signaling higher event counts.
+
+* A color-coded legend on the right maps each landslide type to a distinct color using the Set1 palette, helping users distinguish between categories like debris flow, rock fall, and monsoon-triggered slides.
+
+* Users can zoom, pan, and hover on clusters or individual points to explore regional patterns and view specific landslide types, making it a powerful tool for geospatial analysis.
+
+# **Visualization:**
+
+## **1. Temporal Analysis**
+
+## Number of Landslides per Year and per Month
+
+```{r}
+landslides_subset$year <- year(landslides_subset$date)
+landslides_subset$month <- month(landslides_subset$date, label = TRUE, abbr = TRUE)
+
+ggplot(landslides_subset, aes(x = factor(year))) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "Number of Landslides Per Year",
+       x = "Year",
+       y = "Landslide Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(landslides_subset, aes(x = month)) +
+  geom_bar(fill = "darkorange") +
+  labs(title = "Number of Landslides Per Month (All Years Combined)",
+       x = "Month",
+       y = "Landslide Count") +
+  theme_minimal()
+```
+
+## **The yearly distribution of landslides:**
+
+* Shows significant upward trend in reporting and occurrences over time.
+
+* Peak Activity: Landslides peaked in 2010, followed by 2015 and 2011. This surge may be attributed to increased monitoring, data availability, or a series of high-impact weather events during those years.
+
+* Moderate Activity: Years like 2013 and 2014 also saw elevated landslide counts, suggesting continued attention to recording and possible climate-related influences.
+
+* Lowest Activity: Before 2005, landslide records were sparse, with minimal or no entries in several early years, indicating either a lack of reporting or lower event frequency.
+
+## **The monthly distribution of landslides:**
+
+* Highlights clear seasonal patterns.
+
+* Peak Activity: Landslides are most frequent in July, followed by June and August — likely due to heavy rainfall during monsoon seasons in many regions.
+
+* Moderate Activity: January, March, and December also show elevated counts, possibly reflecting landslides triggered by snowmelt or winter storms in certain areas.
+
+* Lowest Activity: November has the fewest landslides, with October and May also showing lower counts.
+
+## Landslide Sizes Over Time
+
+```{r warning=FALSE, message=FALSE}
+size_trend <- landslides_subset %>%
+  group_by(year, landslide_size) %>%
+  summarise(count = n()) %>%
+  ungroup()
+
+ggplot(size_trend, aes(x = factor(year), y = count, fill = landslide_size)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Landslide Sizes Over Time",
+       x = "Year",
+       y = "Number of Landslides",
+       fill = "Landslide Size") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Analysis of Landslide Sizes Over Time:
+* The stacked bar chart shows the annual distribution of landslides from 1988 to 2016, categorized by landslide size (small, medium, large, very large, and unknown).
+
+* A sharp increase in reported landslides began around 2007, peaking in 2010 with over 1,500 events, followed by fluctuating but generally high activity in subsequent years.
+
+* Medium-sized landslides dominate the dataset across most years, while small and unknown sizes show noticeable increases post-2011.
+
+* Very large landslides are relatively rare throughout the timeline, contributing only a small fraction of total events.
+
+# **2. Trigger-Based Analysis**
+
+## Landslide Triggers Distribution
+
+```{r}
+trigger_counts <- landslides_subset %>%
+  count(landslide_trigger, sort = TRUE)
+
+ggplot(trigger_counts, aes(x = reorder(landslide_trigger, n), y = n)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(title = "Count of Events by Landslide Triggers",
+       x = "Trigger",
+       y = "Count of Events") +
+  coord_flip() +
+  theme_minimal()
+```
+
+## Analysis of Count of Events by Landslide Triggers:
+* The chart illustrates the frequency of different triggers responsible for landslides, highlighting the most common causes.
+
+* Downpour is the leading trigger, associated with nearly 4,000 events, followed by unknown causes and general rain, which together contribute to a significant portion of the total incidents.
+
+* Other notable triggers include continuous rain, tropical cyclones, and monsoons, emphasizing the dominant role of extreme weather in landslide occurrences.
+
+* Natural hazards like earthquakes and snowfall/snowmelt appear less frequently, while volcanoes and dam collapses are among the rarest triggers reported.
+
+## Average Fatility Count by Landslide Trigger
+
+```{r}
+landslides_subset %>%
+  group_by(landslide_trigger) %>%
+  summarise(avg_fatalities = mean(fatality_count, na.rm = TRUE)) %>%
+  ggplot(aes(x = reorder(landslide_trigger, avg_fatalities), y = avg_fatalities)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "Average Fatality Count by Landslide Trigger",
+       x = "Landslide Trigger",
+       y = "Average Fatalities") +
+  coord_flip() +
+  theme_minimal()
+
+```
+
+## Analysis of Average Fatility Count by Landslide Trigger:
+* The chart displays the average number of fatalities associated with each type of landslide trigger.
+
+* Dam embankment collapse stands out with the highest fatality average, nearing 40 deaths per event, indicating its catastrophic impact despite its rarity.
+
+* Other high-fatality triggers include snowfall/snowmelt, monsoon, and tropical cyclone, reflecting the deadly nature of certain weather-related conditions.
+
+* Common triggers like rain and downpour, while frequent, show relatively lower average fatalities, suggesting these events are widespread but typically less deadly per occurrence.
+
+# **3. Severity and Size**
+
+## Landslide Size vs. Fatality Count
+
+```{r warning=FALSE, message=FALSE}
+landslides_subset$landslide_size <- factor(landslides_subset$landslide_size,
+  levels = c("small", "medium", "large", "very_large", "catastrophic", "unknown"))
+
+filtered_data <- landslides_subset %>%
+  filter(!is.na(landslide_size) & landslide_size != "unknown")
+
+ggplot(filtered_data, aes(x = landslide_size, y = fatality_count)) +
+  geom_jitter(color = "orangered", alpha = 0.6, width = 0.2) +
+  scale_y_log10() +
+  labs(title = "Fatality Count vs. Landslide Size (Ordered)",
+       x = "Landslide Size",
+       y = "Fatality Count (log scale)") +
+  theme_minimal()
+
+```
+
+## Analysis of Landslide Size vs. Fatality Count:
+* The chart visualizes the relationship between landslide size and fatality count on a logarithmic scale, allowing better visibility of the wide range in fatality numbers.
+
+* Larger landslides (large and very large) tend to show a higher spread and upper range of fatalities, including several extreme cases with over 1,000 deaths.
+
+* Medium-sized landslides are the most densely populated category, with many events causing between 10 to 100 fatalities.
+
+* Small landslides show relatively lower fatality counts, mostly concentrated below 10 deaths, suggesting smaller events are generally less deadly.
+
+## Landslide Trigger vs. Fatality Count
+```{r warning=FALSE, message=FALSE}
+ggplot(landslides_subset, aes(x = landslide_trigger, y = fatality_count)) +
+  geom_boxplot(fill = "orange", alpha = 0.7, outlier.color = "red") +
+   scale_y_log10() +
+  labs(title = "Fatalities by Landslide Trigger",
+       x = "Landslide Trigger",
+       y = "Fatality Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+## Analysis of Average Fatility Count by Landslide Trigger:
+* The boxplot displays the distribution of fatality counts across different landslide triggers on a logarithmic scale, highlighting both median impact and variability.
+
+* Snowfall/snowmelt, tropical cyclones, and dam embankment collapse show high median fatalities and wide variability, with multiple extreme outliers above 1000 deaths.
+
+* Triggers like construction, freeze-thaw, and no apparent trigger tend to have lower fatality ranges, indicating relatively less deadly consequences.
+
+* Downpour and earthquake-triggered landslides also exhibit significant outliers, suggesting that while not always fatal, they can occasionally result in very high death tolls.
+
+## Fatalities Over Time
+
+```{r}
+landslides_subset %>%
+  group_by(year) %>%
+  summarise(total_fatalities = sum(fatality_count, na.rm = TRUE)) %>%
+  ggplot(aes(x = factor(year), y = total_fatalities)) +
+  geom_bar(stat = "identity", fill = "firebrick") +
+  labs(title = "Total Fatalities Per Year",
+       x = "Year",
+       y = "Total Fatalities") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Analysis of Fatalities Over Time:
+* The chart shows a sharp increase in landslide-related fatalities starting around 2006, peaking dramatically in 2013 with over 6,000 deaths.
+
+* Other high-fatality years include 2010 and 2014, indicating multiple years with widespread or severe landslide events.
+
+* Fatalities were negligible or unrecorded before 2004, likely due to underreporting or limited data availability in earlier years.
+
+* The general trend highlights significant year-to-year variation, suggesting the influence of large-scale events or reporting improvements in certain periods.
+
+## **4. Spatial Distribution**
+
+## Country - wise Landslide Events
+```{r}
+top_countries <- landslides_subset %>%
+  count(country_name, sort = TRUE) %>%
+  top_n(10, n)
+
+ggplot(top_countries, aes(x = reorder(country_name, n), y = n)) +
+  geom_bar(stat = "identity", fill = "seagreen") +
+  labs(title = "Top 10 Countries by Number of Landslides",
+       x = "Country",
+       y = "Number of Landslides") +
+  coord_flip() +  
+  theme_minimal()
+```
+
+## Country-wise Landslide Events
+
+* The United States leads significantly with the highest number of reported landslides, exceeding 2,500 events, followed by India with about 1,000 events.
+
+* Other high-incidence countries include the Philippines, Nepal, and China, highlighting regions vulnerable due to geography and climate.
+
+* The remaining countries—Indonesia, Brazil, United Kingdom, Canada, and Malaysia—show moderate landslide counts, ranging from around 100 to 400 events.
+
+* The data emphasizes both tropical and mountainous regions as landslide-prone, driven by heavy rainfall, deforestation, and seismic activity.
+
+# **Modeling**
+
+## 1. Dimension Reduction: t-SNE
+```{r}
+size_map <- c("small" = 1, "medium" = 2, "large" = 3, "very_large" = 4, "catastrophic" = 5)
+landslides_subset$size_numeric <- size_map[as.character(landslides_subset$landslide_size)]
+
+landslides_subset$iso_a3 <- countrycode(landslides_subset$country_name, origin = "country.name", destination = "iso3c")
+landslides_subset <- landslides_subset[!is.na(landslides_subset$iso_a3), ]
+
+cluster_data <- landslides_subset %>%
+  group_by(iso_a3) %>%
+  summarise(
+    frequency = n(),
+    total_fatalities = sum(fatality_count, na.rm = TRUE),
+    total_size = sum(size_numeric, na.rm = TRUE)
+  ) %>%
+  na.omit()
+
+scaled_features <- scale(cluster_data[, c("frequency", "total_fatalities", "total_size")])
+
+unique_indices <- which(!duplicated(scaled_features))
+scaled_unique <- scaled_features[unique_indices, ]
+cluster_data_unique <- cluster_data[unique_indices, ]
+
+set.seed(123)
+tsne_result <- Rtsne(scaled_unique, dims = 2, perplexity = 30, verbose = TRUE, max_iter = 1000)
+
+tsne_df <- as.data.frame(tsne_result$Y)
+tsne_df$iso_a3 <- cluster_data_unique$iso_a3
+tsne_df$country_name <- countrycode(tsne_df$iso_a3, origin = "iso3c", destination = "country.name")
+
+ggplot(tsne_df, aes(x = V1, y = V2)) +
+  geom_point(color = "steelblue", size = 3, alpha = 0.7) +
+  geom_text_repel(aes(label = iso_a3), size = 3, max.overlaps = 30) +
+  labs(
+    title = "t-SNE Projection of Countries",
+    x = "t-SNE 1",
+    y = "t-SNE 2"
+  ) +
+  theme_minimal()
+
+```
+
+## Analysis of Dimension Reduction using t-SNE:
+
+* Applied t-SNE to reduce high-dimensional landslide data into 2D while preserving local structure.
+
+* This 2D scatterplot displays countries projected using t-SNE, based on their landslide-related characteristics: event frequency, total fatalities, and total size.
+
+* Countries positioned closer together on the plot exhibit similar landslide profiles, while those farther apart are more dissimilar.
+
+* Natural groupings are visible — for example, South/Southeast Asian countries like IND, CHN, PAK, and IDN cluster on the left, indicating high similarity.
+
+* No clustering has been applied yet; this visualization purely reflects feature-based similarity after dimensionality reduction, setting the stage for clustering methods like GMM.
+
+## Clustering: GMM(Guasian Mixture Model)
+
+```{r}
+gmm_result <- Mclust(tsne_result$Y, G = 3)
+cluster_data_unique$raw_cluster <- gmm_result$classification
+
+risk_order <- cluster_data_unique %>%
+  group_by(raw_cluster) %>%
+  summarise(risk_score = mean(frequency + total_fatalities + total_size)) %>%
+  arrange(desc(risk_score)) %>%
+  mutate(new_cluster = as.factor(row_number()))
+
+cluster_data_unique <- cluster_data_unique %>%
+  left_join(risk_order, by = "raw_cluster") %>%
+  mutate(cluster = new_cluster)
+
+tsne_df$cluster <- cluster_data_unique$cluster
+
+ggplot(tsne_df, aes(x = V1, y = V2, color = cluster, label = iso_a3)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_text_repel(size = 3, max.overlaps = 30) +
+  scale_color_manual(values = c("1" = "red", "2" = "orange", "3" = "#90EE65")) +
+  labs(
+    title = "t-SNE + GMM Clustering of Countries",
+    x = "t-SNE 1",
+    y = "t-SNE 2",
+    color = "Cluster"
+  ) +
+  theme_minimal()
+
+world <- ne_countries(scale = "medium", returnclass = "sf")
+world_clustered <- left_join(world, cluster_data_unique, by = "iso_a3")
+
+world_clustered$cluster_label <- as.character(world_clustered$cluster)
+world_clustered$cluster_label[is.na(world_clustered$cluster_label)] <- "No Data"
+
+cluster_colors <- c(
+  "1" = "red",
+  "2" = "orange",
+  "3" = "#90EE65",
+  "No Data" = "lightgray"
+)
+
+ggplot(world_clustered) +
+  geom_sf(aes(fill = cluster_label)) +
+  scale_fill_manual(
+    values = cluster_colors,
+    breaks = c("1", "2", "3", "No Data"),
+    labels = c("1 = High Risk", "2 = Medium Risk", "3 = Low Risk", "No Data"),
+    name = "Cluster"
+  ) +
+  labs(
+    title = "Landslide Risk Clusters by Country (t-SNE + GMM)",
+    subtitle = "Clusters reordered by total risk (fatalities + size + frequency)"
+  ) +
+  theme_minimal()
+```
+
+## Landslide Risk Clustering Summary:
+
+### Cluster 1 – High Risk (Red)
+
+Cluster 1 represents the highest-risk countries (e.g., United States, India, China, Nepal, Philippines, Brazil) in terms of landslide occurrence and severity. These regions face frequent and large-scale landslides, often leading to significant fatalities and extensive damage. The contributing factors typically include steep terrain, monsoons or cyclones, deforestation, and vulnerable populations living in hazard-prone areas. Countries in this group require urgent attention for early warning systems, infrastructure reinforcement, and long-term climate adaptation planning to reduce risk and protect lives and property.
+
+### Cluster 2 – Moderate Risk (Orange)
+
+Cluster 2 includes countries (e.g. Canada, Russia, Australia) that experience moderate levels of landslide activity. These nations report occasional landslides that vary in scale but generally result in lower fatality rates. The impact may be localized to mountainous or hilly regions, with some infrastructure or economic disruption. Countries in this cluster may already have some risk management systems in place, but still face challenges during heavy rainfall, rapid urbanization, or terrain instability. These regions would benefit from enhanced disaster preparedness and localized mitigation strategies.
+
+
+### Cluster 3 – Low Risk (Light Green)
+
+Countries in Cluster 3 (e.g. Germany, Mongolia, Tanzania, Zambia) experience relatively low landslide risk. These regions report infrequent landslide events, typically small in scale and with minimal to no fatalities. The landslides that do occur are often the result of rare or extreme weather conditions rather than recurring environmental patterns. These areas are considered to be at the lowest priority for immediate landslide mitigation efforts.
+
+# **Summary:**
+
+This project explored global landslide risk patterns using unsupervised machine learning techniques applied to historical landslide data. After cleaning and transforming the dataset, key features—such as event frequency, total fatalities, and total landslide size—were aggregated at the country level. To visualize and uncover underlying patterns, the project employed t-SNE for dimensionality reduction, effectively projecting high-dimensional country-level data into a two-dimensional space. Countries with similar landslide characteristics naturally clustered together in this reduced representation.
+
+Gaussian Mixture Models (GMM) were then applied to perform probabilistic clustering on the t-SNE output, segmenting countries into high-risk, moderate-risk, and low-risk groups. These clusters were validated and visualized using both a 2D scatterplot and a global choropleth map, revealing geographic patterns consistent with known environmental vulnerabilities. High-risk countries—such as United States, India, and China exhibited frequent and severe landslide activity, while nations like Mongolia and several in Africa were categorized as low-risk. This data-driven approach demonstrates the effectiveness of unsupervised learning in environmental risk analysis and offers valuable insights to inform global disaster preparedness strategies.
